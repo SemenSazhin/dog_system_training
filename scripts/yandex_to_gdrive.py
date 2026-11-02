@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Ежедневная проверка клипов video-scan на Яндекс Диске.
+"""Перенос проверенных клипов video-scan с Яндекс Диска в датасет на Google Диске (диск G:, Google Drive for desktop).
 
-Для каждого клипа из no_defecation: скачать, проверить, залить годные на Google Диск, после
-успешной проверки загрузки перенести файл в корзину Яндекс Диска. Негодные тоже уходят в корзину
-(только с --apply; корзина обратима, безвозвратно файлы не удаляются никогда).
-Папки health_check, *_with_boxes и defecation не переносятся: defecation только попадает в отчёт.
+Переносятся только клипы с вердиктом из verdicts.json ("0" - нет дефекации, "1" - есть дефекация).
+Вердикты ставятся после просмотра кадров и подтверждения человеком; без вердикта клип не трогается.
+Порядок для каждого клипа: скачать (если нет локальной копии) -> скопировать в data\\<класс> на G: ->
+сверить md5 копии -> только после этого перенести исходник на Яндексе в корзину (обратимо, не навсегда).
 
-Без --apply ничего не загружается и не удаляется, только пишется отчёт.
+Без --apply ничего не копируется и не удаляется, пишется только отчёт.
+--trash-bad дополнительно отправляет в корзину клипы, не прошедшие техническую проверку (см. check_clip).
+Папки health_check, *_with_boxes и defecation этот скрипт не переносит.
 """
 import argparse
 import hashlib
 import json
-import os
+import shutil
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -26,8 +27,10 @@ import numpy as np
 ENV = Path(r"C:\Users\Zhenya\Desktop\Детекция Собак\video-scan\.env")
 BASE = "disk:/Датасет Собак"
 WORK = Path(r"D:\dog-ml\yd_sync")
-GTOKEN = WORK / "gtoken.json"          # создаёт get_refresh_token.py, в git не попадает
+CLIPS = WORK / "clips"
+VERDICTS = WORK / "verdicts.json"      # {путь на Яндексе: "0" | "1" | "skip"}
 STATE = WORK / "state.json"
+DATA_DIR = Path(r"G:\Мой диск\Система контроля за собаками\data")
 API = "https://cloud-api.yandex.net/v1/disk/resources"
 MIN_SEC, MIN_SIDE, MIN_READ, MIN_MOTION = 3.0, 360, 0.9, 0.15
 DOG_WEIGHTS = r"D:\dog-ml\bench\yolo26s.pt"
@@ -40,7 +43,7 @@ def yandex_token():
     raise SystemExit("YANDEX_DISK_TOKEN не найден в .env")
 
 
-def ycall(token, method, url, **kw):
+def ycall(token, method, url):
     req = urllib.request.Request(url, method=method, headers={"Authorization": f"OAuth {token}"})
     with urllib.request.urlopen(req, timeout=60) as r:
         body = r.read()
@@ -73,8 +76,16 @@ def ydownload(token, path, dest, tries=3):
 
 
 def ytrash(token, path):
-    # permanently=false: файл идёт в корзину и восстанавливается
+    # permanently=false: файл идёт в корзину Яндекс Диска и восстанавливается
     ycall(token, "DELETE", f"{API}?" + urllib.parse.urlencode({"path": path, "permanently": "false"}))
+
+
+def md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def check_clip(path, dog_model):
@@ -97,14 +108,12 @@ def _check_clip(cap, dog_model):
     if min(w, h) < MIN_SIDE:
         return False, f"малое разрешение {w}x{h}"
     idx = np.linspace(0, n - 1, 6).astype(int)
-    frames, bad = [], 0
+    frames = []
     for i in idx:
         cap.set(1, int(i))
         ok, fr = cap.read()
         if ok and fr is not None:
             frames.append(fr)
-        else:
-            bad += 1
     if len(frames) / len(idx) < MIN_READ:
         return False, "кадры не читаются"
     g = [cv2.cvtColor(cv2.resize(f, (160, 90)), cv2.COLOR_BGR2GRAY).astype(np.float32) for f in frames]
@@ -119,90 +128,84 @@ def _check_clip(cap, dog_model):
     return True, "ok"
 
 
-def gdrive_service():
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-    info = json.loads(GTOKEN.read_text(encoding="utf-8"))
-    creds = Credentials(None, refresh_token=info["refresh_token"], token_uri="https://oauth2.googleapis.com/token",
-                        client_id=info["client_id"], client_secret=info["client_secret"],
-                        scopes=["https://www.googleapis.com/auth/drive.file"])
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-
-def gdrive_upload(svc, local, name, parent):
-    from googleapiclient.http import MediaFileUpload
-    meta = {"name": name, "parents": [parent]}
-    media = MediaFileUpload(str(local), mimetype="video/mp4", resumable=True)
-    f = svc.files().create(body=meta, media_body=media, fields="id,md5Checksum,size").execute()
-    md5 = hashlib.md5(Path(local).read_bytes()).hexdigest()
-    return f["id"], f.get("md5Checksum") == md5
+def copy_verified(local, dest_dir):
+    """Копирует клип в dest_dir, сверяет md5 копии; возвращает (путь, ok). Существующий файл с тем же md5 считается копией."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    src_md5 = md5(local)
+    dest = dest_dir / local.name.split("__", 2)[-1]
+    if dest.exists():
+        if md5(dest) == src_md5:
+            return dest, True
+        dest = dest_dir / f"{dest.stem}_{src_md5[:6]}{dest.suffix}"
+    shutil.copy2(local, dest)
+    return dest, md5(dest) == src_md5
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--apply", action="store_true", help="загружать и переносить в корзину")
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--gdrive-parent", default="", help="id папки Google Диска для клипов")
+    ap.add_argument("--apply", action="store_true", help="копировать на G: и переносить исходники в корзину")
+    ap.add_argument("--trash-bad", action="store_true", help="в корзину и клипы, не прошедшие техническую проверку")
     ap.add_argument("--no-dog-check", action="store_true")
     a = ap.parse_args()
     WORK.mkdir(parents=True, exist_ok=True)
+    CLIPS.mkdir(exist_ok=True)
     state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+    verdicts = json.loads(VERDICTS.read_text(encoding="utf-8")) if VERDICTS.exists() else {}
+    if a.apply and not DATA_DIR.exists():
+        raise SystemExit(f"{DATA_DIR} недоступна: запустите Google Drive for desktop")
     token = yandex_token()
     dog = None
-    if not a.no_dog_check:
+    if a.trash_bad and not a.no_dog_check:
         from ultralytics import YOLO
         dog = YOLO(DOG_WEIGHTS)
-    svc = gdrive_service() if (a.apply and GTOKEN.exists() and a.gdrive_parent) else None
-    if a.apply and svc is None:
-        print("Google Диск не настроен: годные клипы НЕ переносятся и не удаляются, негодные уйдут в корзину")
 
-    items = []
-    for cam in ylist(token, f"{BASE}/no_defecation"):
-        if cam["type"] == "dir":
-            items += [f for f in ylist(token, cam["path"]) if f["type"] == "file"]
-    if a.limit:
-        items = items[:a.limit]
-    report = {"ok": [], "bad": [], "moved": [], "trashed": [], "errors": []}
-    tmp = Path(tempfile.mkdtemp(dir=WORK))
-    for it in items:
-        p = it["path"]
+    listed = {}
+    for folder in ("no_defecation",):
+        for cam in ylist(token, f"{BASE}/{folder}"):
+            if cam["type"] == "dir":
+                for f in ylist(token, cam["path"]):
+                    if f["type"] == "file":
+                        listed[f["path"]] = (folder, cam["name"], f)
+    report = {"pending_no_verdict": 0, "copied": [], "trashed": [], "bad": [], "errors": []}
+    for p, (folder, cam, f) in listed.items():
         if state.get(p, {}).get("done"):
             continue
-        local = tmp / it["name"]
+        v = verdicts.get(p)
+        local = CLIPS / f"{folder}__{cam}__{f['name']}"
         try:
-            ydownload(token, p, local)
-            ok, why = check_clip(local, dog)
-            if ok:
-                report["ok"].append(p)
-                if svc:
-                    gid, good = gdrive_upload(svc, local, it["name"], a.gdrive_parent)
-                    if good:
-                        ytrash(token, p)
-                        state[p] = {"done": True, "gdrive": gid}
-                        report["moved"].append(p)
-                    else:
-                        report["errors"].append((p, "md5 не совпал после загрузки"))
-            else:
-                report["bad"].append((p, why))
-                if a.apply:
-                    ytrash(token, p)
-                    state[p] = {"done": True, "trashed": why}
-                    report["trashed"].append(p)
+            if v in ("0", "1"):
+                if not local.exists():
+                    ydownload(token, p, local)
+                if not a.apply:
+                    report["copied"].append((p, v, "dry-run"))
+                    continue
+                dest, ok = copy_verified(local, DATA_DIR / v)
+                if not ok:
+                    report["errors"].append((p, "md5 копии не совпал, исходник не тронут"))
+                    continue
+                ytrash(token, p)
+                state[p] = {"done": True, "class": v, "dest": str(dest)}
+                report["copied"].append((p, v, str(dest)))
+            elif v is None:
+                report["pending_no_verdict"] += 1
+                if a.trash_bad:
+                    if not local.exists():
+                        ydownload(token, p, local)
+                    ok, why = check_clip(local, dog)
+                    if not ok:
+                        report["bad"].append((p, why))
+                        if a.apply:
+                            ytrash(token, p)
+                            state[p] = {"done": True, "trashed": why}
+                            report["trashed"].append(p)
         except (urllib.error.URLError, OSError, Exception) as e:  # noqa: BLE001
             report["errors"].append((p, str(e)[:120]))
-        finally:
-            local.unlink(missing_ok=True)
-    try:
-        tmp.rmdir()
-    except OSError:
-        pass
     STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
-    stamp = time.strftime("%Y%m%d_%H%M")
-    (WORK / f"report_{stamp}.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"всего {len(items)}: годных {len(report['ok'])}, негодных {len(report['bad'])}, "
-          f"перенесено {len(report['moved'])}, в корзину {len(report['trashed'])}, ошибок {len(report['errors'])}")
-    for p, why in report["bad"][:15]:
-        print("  негодный:", p.split("/")[-1], "-", why)
+    (WORK / f"report_{time.strftime('%Y%m%d_%H%M')}.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"на Яндексе {len(listed)}; без вердикта {report['pending_no_verdict']}; "
+          f"{'скопировано' if a.apply else 'к копированию (dry-run)'} {len(report['copied'])}; "
+          f"негодных {len(report['bad'])}, в корзину {len(report['trashed'])}, ошибок {len(report['errors'])}")
     for p, why in report["errors"][:5]:
         print("  ошибка:", p.split("/")[-1], "-", why)
 

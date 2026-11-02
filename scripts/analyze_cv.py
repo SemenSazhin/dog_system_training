@@ -175,21 +175,21 @@ def chart_zoo():
 
 # ------------------------------------------------------------------ 2. группы точек
 def chart_groups():
-    ref = {m: g("grp_all", m) for m in ("tcn", "stgcn")}
+    ms = [("lstm", PURPLE), ("tcn", NAVY), ("stgcn", ORANGE)]
+    ref = {m: g("grp_all", m) for m, _ in ms}
     if all(v is None for v in ref.values()):
         return
     only = [("only_spine", "позвоночник"), ("only_hips", "таз"), ("only_tail", "хвост"), ("only_front", "перед. лапы"),
             ("only_rear", "задн. лапы"), ("spine_hips", "позв.+таз"), ("hips_tail", "таз+хвост"),
             ("spine_tail", "позв.+хвост"), ("legs", "все лапы"), ("tail_rear", "хвост+задн.л."),
             ("hips_tail_rear", "таз+хвост+задн.л.")]
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5.2), sharey=True)
-    for ax, m in zip(axes, ("tcn", "stgcn")):
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.2), sharey=True)
+    for ax, (m, col) in zip(axes, ms):
         labs, vals, errs = ["все 20"], [ref[m] or 0], [gs("grp_all", m) or 0]
         for k, lab in only:
             if g(f"grp_{k}", m) is not None:
                 labs.append(lab); vals.append(g(f"grp_{k}", m)); errs.append(gs(f"grp_{k}", m))
-        cols = [NAVY] + [ORANGE] * (len(labs) - 1)
-        bars(ax, labs, vals, errs, cols)
+        bars(ax, labs, vals, errs, [col] * len(labs))
         ax.set_xticklabels(labs, rotation=40, ha="right")
         ax.set_ylim(0.4, 1.0)
         if META_AUC:
@@ -203,10 +203,10 @@ def chart_groups():
     fig, ax = plt.subplots(figsize=(10, 5))
     keys = [("drop_spine", "без позвоночника"), ("drop_hips", "без таза"), ("drop_tail", "без хвоста"),
             ("drop_front", "без перед. лап"), ("drop_rear", "без задн. лап")]
-    w = 0.38
-    for j, (m, col) in enumerate((("tcn", NAVY), ("stgcn", ORANGE))):
+    w = 0.26
+    for j, (m, col) in enumerate(ms):
         d = [((g(f"grp_{k}", m) or np.nan) - (ref[m] or np.nan)) for k, _ in keys]
-        pos = np.arange(len(keys)) + (j - 0.5) * w
+        pos = np.arange(len(keys)) + (j - 1) * w
         ax.bar(pos, d, w, color=col, label=m)
         for p, v in zip(pos, d):
             if np.isfinite(v):
@@ -216,7 +216,8 @@ def chart_groups():
     ax.set_xticks(np.arange(len(keys)), [l for _, l in keys])
     ax.set_ylabel("изменение ROC-AUC")
     ax.set_title("Что теряем, если убрать группу (относительно всех 20 точек)", loc="left")
-    ax.legend()
+    ax.set_ylim(-0.035, 0.04)
+    ax.legend(loc="lower left")
     fig.tight_layout()
     fig.savefig(OUT / "groups_drop.png", dpi=170)
     plt.close(fig)
