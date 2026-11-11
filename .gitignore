@@ -2,3 +2,15 @@ client_secret*.json
 models/
 data/
 __pycache__/
+*.zip
+*.tar
+*.part
+datasets/stipra/videos.zip
+datasets/shitspotter/webdataset_shards/
+datasets/**/.cache/
+cleanup_detection/models/
+*.pt
+*.pth
+.ipynb_checkpoints/
+cleanup_detection/_build_notebook.py
+cleanup_detection/_nb_*.json

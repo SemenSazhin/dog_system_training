@@ -1,0 +1,9 @@
+{
+  "source": "https://huggingface.co/datasets/TeknTrash/Stipra",
+  "videos_zip_gb": 21.7,
+  "n_videos": 1273,
+  "license": "osl-3.0",
+  "relevance": "Closest open video dataset: people disposing household products into garbage. Useful positive proxy for cleanup / bend / bag / discard motions.",
+  "readme_path": "C:\\Users\\37727\\OneDrive\\Рабочий стол\\dogs\\dogsproject\\datasets\\stipra\\README.md",
+  "full_download_command": "huggingface-cli download TeknTrash/Stipra --repo-type dataset --include videos.zip --local-dir datasets/stipra"
+}

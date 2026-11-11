@@ -1,0 +1,12 @@
+{
+  "n_pos": 120,
+  "n_neg": 120,
+  "window": 48,
+  "feature_dim": 51,
+  "keypoints": 17,
+  "labels": {
+    "0": "no_cleanup",
+    "1": "cleanup"
+  },
+  "note": "Synthetic COCO-17 pose sequences for pipeline/unit tests before real video labeling."
+}

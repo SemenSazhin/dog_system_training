@@ -1,0 +1,80 @@
+{
+  "task": "Detect whether a person cleaned up after a dog (human pose / action on video)",
+  "exact_match_found": false,
+  "sequence_architectures": [
+    "lstm",
+    "bilstm",
+    "gru",
+    "bigru",
+    "mamba_lite",
+    "transformer",
+    "temporal_transformer"
+  ],
+  "pretrained_human_pose": [
+    {
+      "name": "YOLOv8n-pose / YOLOv8s-pose / YOLOv8m-pose",
+      "source": "Ultralytics",
+      "weights": [
+        "yolov8n-pose.pt",
+        "yolov8s-pose.pt",
+        "yolov8m-pose.pt"
+      ],
+      "keypoints": 17,
+      "train_data": "COCO Keypoints"
+    },
+    {
+      "name": "YOLOv11n-pose",
+      "source": "Ultralytics",
+      "weights": [
+        "yolo11n-pose.pt"
+      ],
+      "keypoints": 17,
+      "train_data": "COCO Keypoints"
+    },
+    {
+      "name": "MediaPipe Pose Landmarker",
+      "source": "Google MediaPipe",
+      "keypoints": 33,
+      "note": "Good CPU realtime alternative; different skeleton than COCO-17"
+    }
+  ],
+  "datasets": [
+    {
+      "id": "stipra",
+      "url": "https://huggingface.co/datasets/TeknTrash/Stipra",
+      "type": "video",
+      "size": "~21.7 GB / 1273 videos",
+      "use": "positive proxy: dispose/throw trash"
+    },
+    {
+      "id": "shitspotter",
+      "url": "https://huggingface.co/datasets/erotemic/shitspotter",
+      "type": "images",
+      "size": "~30GB+ shards",
+      "use": "dog feces before/after photos (not human action)"
+    },
+    {
+      "id": "charades",
+      "url": "https://allenai.org/data/charades",
+      "type": "video+annotations",
+      "use": "throw/put/take/tidy/stand/sit proxies"
+    },
+    {
+      "id": "kinetics_related",
+      "url": "https://github.com/cvdfoundation/kinetics-dataset",
+      "type": "video urls",
+      "use": "squat / sweeping floor / garbage collecting / picking fruit"
+    },
+    {
+      "id": "stair_actions",
+      "url": "https://actions.stair.center",
+      "type": "video",
+      "use": "everyday home actions incl. throwing trash"
+    }
+  ],
+  "label_scheme_recommended": {
+    "0": "no_cleanup",
+    "1": "cleanup",
+    "notes": "Prefer clip-level labels from videos. If only own CCTV data exists, annotate windows where person bends, reaches ground near dog waste, bags it, and stands up."
+  }
+}
