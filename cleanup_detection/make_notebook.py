@@ -725,7 +725,7 @@ cells.append(
 cells.append(
     md(
         """
-        ## Инференс лучшей модели на видео
+        ## Инференс всех архитектур на видео
         """
     )
 )
@@ -733,7 +733,7 @@ cells.append(
 cells.append(
     code(
         r"""
-        # @title Video inference
+        # @title Video inference (all architectures)
         def resolve_arch(name: str) -> str:
             for a in ['temporal_transformer', 'transformer', 'mamba_lite', 'bilstm', 'bigru', 'lstm', 'gru']:
                 if name.startswith(a) or a in name:
@@ -741,11 +741,11 @@ cells.append(
             return name
 
 
-        def load_best_sequence_model():
-            ckpt_path = Path(best['dir']) / 'model.pth'
+        def load_sequence_model(row):
+            ckpt_path = Path(row['dir']) / 'model.pth'
             # PyTorch 2.6+ defaults weights_only=True; our ckpt stores numpy scalars in metrics/params
             ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-            arch = resolve_arch(ckpt.get('arch', best['arch']))
+            arch = resolve_arch(ckpt.get('arch', row['arch']))
             params = {k: v for k, v in ckpt.get('params', {}).items() if k not in ('lr', 'weight_decay')}
             model = build_model(arch, ckpt['input_size'], **params).to(DEVICE)
             model.load_state_dict(ckpt['model_state_dict'])
@@ -753,16 +753,19 @@ cells.append(
             return model, ckpt
 
 
-        def run_video_cleanup_detector(video_path, output_path, pose_weights='yolov8n-pose.pt', thr=0.5):
-            model, _ = load_best_sequence_model()
+        def load_best_sequence_model():
+            return load_sequence_model(best)
+
+
+        def extract_pose_stream(video_path, pose_weights='yolov8n-pose.pt'):
+            """Run YOLO-pose once; yield (frame, boxes, kps) for all models."""
             pose = YOLO(pose_weights)
-            track = IoUTracker()
             cap = cv2.VideoCapture(str(video_path))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 25
+            if not cap.isOpened():
+                raise FileNotFoundError(f'Cannot open video: {video_path}')
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
             w, h = int(cap.get(3)), int(cap.get(4))
-            writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-            buffers = {}
-            probs_hist = []
+            frames = []
             while True:
                 ok, frame = cap.read()
                 if not ok:
@@ -774,7 +777,41 @@ cells.append(
                         if float(res.boxes.conf[i]) < cfg.person_conf:
                             continue
                         boxes.append(res.boxes.xyxy[i].cpu().numpy().tolist())
-                        kps.append(res.keypoints.data[i].cpu().numpy() if res.keypoints is not None else np.zeros((17, 3), np.float32))
+                        if res.keypoints is not None:
+                            kps.append(res.keypoints.data[i].cpu().numpy())
+                        else:
+                            kps.append(np.zeros((17, 3), np.float32))
+                frames.append((frame, boxes, kps))
+            cap.release()
+            return frames, fps, w, h
+
+
+        def run_video_cleanup_detector(
+            video_path,
+            output_path,
+            model=None,
+            row=None,
+            pose_weights='yolov8n-pose.pt',
+            thr=0.5,
+            pose_cache=None,
+            tag='',
+        ):
+            if model is None:
+                model, _ = load_sequence_model(row or best)
+            if pose_cache is None:
+                frames, fps, w, h = extract_pose_stream(video_path, pose_weights)
+            else:
+                frames, fps, w, h = pose_cache
+
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+            track = IoUTracker()
+            buffers = {}
+            probs_hist = []
+            n_cleanup = 0
+            n_scored = 0
+
+            for frame, boxes, kps in frames:
                 vis = frame.copy()
                 label, p = 'no_cleanup', 0.0
                 for tid, box in track.update(boxes):
@@ -789,20 +826,87 @@ cells.append(
                             p = float(torch.softmax(logits, 1)[0, 1].cpu())
                         label = 'cleanup' if p >= thr else 'no_cleanup'
                         probs_hist.append(p)
+                        n_scored += 1
+                        n_cleanup += int(label == 'cleanup')
                     x1, y1, x2, y2 = map(int, box)
                     color = (0, 200, 0) if label == 'cleanup' else (0, 165, 255)
+                    title = f'{tag} id:{tid} {label} {p:.2f}'.strip()
                     cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(vis, f'id:{tid} {label} {p:.2f}', (x1, max(20, y1 - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    cv2.putText(vis, title, (x1, max(20, y1 - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
                 writer.write(vis)
-            cap.release()
             writer.release()
-            print('saved', output_path, 'mean_p', float(np.mean(probs_hist) if probs_hist else 0))
-            return output_path
+
+            mean_p = float(np.mean(probs_hist)) if probs_hist else 0.0
+            cleanup_rate = float(n_cleanup / n_scored) if n_scored else 0.0
+            print(f"saved {output_path} | mean_p={mean_p:.3f} cleanup_rate={cleanup_rate:.3f} scored={n_scored}")
+            return {
+                'output_path': str(output_path),
+                'mean_p': mean_p,
+                'cleanup_rate': cleanup_rate,
+                'n_scored_windows': n_scored,
+                'n_cleanup_windows': n_cleanup,
+            }
 
 
-        print('Best model for inference:', best['tag'], best['arch'])
-        # run_video_cleanup_detector('/content/test.mp4', '/content/cleanup_out.mp4')
+        def run_video_all_architectures(
+            video_path='/content/test.mp4',
+            out_dir=None,
+            pose_weights='yolov8n-pose.pt',
+            thr=0.5,
+            model_rows=None,
+        ):
+            model_rows = model_rows or results
+            out_dir = Path(out_dir or (Path(cfg.models_root) / 'video_runs'))
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            print(f'Extracting pose once from {video_path} ...')
+            frames, fps, w, h = extract_pose_stream(video_path, pose_weights)
+            pose_cache = (frames, fps, w, h)
+            print(f'frames={len(frames)} fps={fps:.2f} size={w}x{h}; running {len(model_rows)} models')
+
+            summary = []
+            for row in model_rows:
+                tag = row['tag']
+                print(f'\\n=== {tag} ({row["arch"]}) ===')
+                model, _ = load_sequence_model(row)
+                out_path = out_dir / f'{tag}.mp4'
+                stats = run_video_cleanup_detector(
+                    video_path,
+                    out_path,
+                    model=model,
+                    thr=thr,
+                    pose_cache=pose_cache,
+                    tag=tag,
+                )
+                summary.append({
+                    'tag': tag,
+                    'arch': row['arch'],
+                    'train_f1': row.get('f1'),
+                    'train_accuracy': row.get('accuracy'),
+                    **stats,
+                    'is_best': tag == best['tag'],
+                })
+                del model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            sdf = pd.DataFrame(summary).sort_values('mean_p', ascending=False)
+            csv_path = out_dir / 'video_inference_summary.csv'
+            sdf.to_csv(csv_path, index=False)
+            print('\\n=== VIDEO INFERENCE ALL ARCHITECTURES ===')
+            print(sdf.to_string(index=False))
+            print('summary:', csv_path)
+            print('best-by-train still:', best['tag'])
+            return sdf
+
+
+        print('Models for video test:', [r['tag'] for r in results])
+        print('Best-by-train F1:', best['tag'], best['arch'])
+        # Uncomment / set path:
+        # video_summary = run_video_all_architectures('/content/test.mp4')
+        # # single model still available:
+        # run_video_cleanup_detector('/content/test.mp4', '/content/cleanup_out_best.mp4', row=best)
         """
     )
 )
