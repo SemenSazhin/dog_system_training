@@ -743,7 +743,8 @@ cells.append(
 
         def load_best_sequence_model():
             ckpt_path = Path(best['dir']) / 'model.pth'
-            ckpt = torch.load(ckpt_path, map_location=DEVICE)
+            # PyTorch 2.6+ defaults weights_only=True; our ckpt stores numpy scalars in metrics/params
+            ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
             arch = resolve_arch(ckpt.get('arch', best['arch']))
             params = {k: v for k, v in ckpt.get('params', {}).items() if k not in ('lr', 'weight_decay')}
             model = build_model(arch, ckpt['input_size'], **params).to(DEVICE)
