@@ -1,9 +1,9 @@
 {
   "files": {
     "cleanup_detection/HumanCleanupDetector.ipynb": {
-      "drive_md5": "258b95065f037374eb7e8e4e6dcf3475",
+      "drive_md5": "0c9a1e06cb8c52bae47d973556538eee",
       "id": "1OBXxeuABaLc2AJexDtnmy4iNaBXjHF7E",
-      "repo_sha": "39f0e2df1eff6ae86e255fb9f4fcac55e160136a2742c47b2192440917468f36"
+      "repo_sha": "55853d5b305483c1008f12a1a6c42c5f79e8aea1f54b8e3b30b2c680588ac70b"
     },
     "new/PoopDetector.ipynb": {
       "drive_md5": "ff09225985044ec84ba19e0618b3a7da",
